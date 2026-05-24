@@ -8,7 +8,7 @@ from typing import Callable
 
 from bleak import BleakClient
 
-from zero_updater.ble import RX_CHAR, TX_CHAR, FC_CHAR
+from zero_updater.ble import RX_CHAR, TX_CHAR, FC_CHAR, STS_CHAR
 from zero_updater._pb import get_pb2
 
 
@@ -92,36 +92,9 @@ class FlipperRPC:
     # ── Session lifecycle ───────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Subscribe to BLE notifications and start RPC session."""
+        """Subscribe to TX indications. RPC session auto-opens on BLE connect."""
         await self.client.start_notify(TX_CHAR, self._on_data)
-        # Tell Flipper our receive buffer size via flow control char
-        import struct
-        try:
-            await self.client.write_gatt_char(
-                FC_CHAR, struct.pack(">I", 8192), response=False
-            )
-        except Exception:
-            pass  # FC write not supported on all firmware versions
-        await self._init_rpc_session()
-
-    async def _init_rpc_session(self, timeout: float = 5.0) -> None:
-        """Send CLI command to open the protobuf RPC channel."""
-        self._raw_rx.clear()
-        cmd = b"start_rpc_session\r\n"
-        chunk_sz = min(self.client.mtu_size - 3, 200)
-        for i in range(0, len(cmd), chunk_sz):
-            await self.client.write_gatt_char(
-                RX_CHAR, cmd[i : i + chunk_sz], response=True
-            )
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            await asyncio.sleep(0.1)
-            if self._raw_rx:
-                resp = bytes(self._raw_rx)
-                if b"session_started" in resp or b"Session started" in resp:
-                    break
         self._rpc_mode = True
-        self._raw_rx.clear()
 
     async def stop(self) -> None:
         """Unsubscribe from BLE notifications."""
@@ -147,9 +120,8 @@ class FlipperRPC:
         chunk_sz = min(self.client.mtu_size - 3, 200)
         for i in range(0, len(frame), chunk_sz):
             await self.client.write_gatt_char(
-                RX_CHAR, frame[i : i + chunk_sz], response=False
+                RX_CHAR, frame[i : i + chunk_sz], response=True
             )
-            await asyncio.sleep(0.005)
 
     async def _recv(self, timeout: float = 30.0):
         return await asyncio.wait_for(self._responses.get(), timeout=timeout)
@@ -187,11 +159,12 @@ class FlipperRPC:
         """
         total = len(data)
         sent = 0
+        cmd_id = self._next_id()
         while sent < total:
             end = min(sent + self.WRITE_CHUNK, total)
             is_last = end >= total
             msg = self.pb2.Main()
-            msg.command_id = self._next_id()
+            msg.command_id = cmd_id
             msg.has_next = not is_last
             msg.storage_write_request.path = path
             msg.storage_write_request.file.data = data[sent:end]
