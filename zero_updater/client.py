@@ -8,7 +8,7 @@ from typing import Callable
 
 from bleak import BleakClient
 
-from zero_updater.ble import RX_CHAR, TX_CHAR
+from zero_updater.ble import RX_CHAR, TX_CHAR, FC_CHAR
 from zero_updater._pb import get_pb2
 
 
@@ -94,6 +94,14 @@ class FlipperRPC:
     async def start(self) -> None:
         """Subscribe to BLE notifications and start RPC session."""
         await self.client.start_notify(TX_CHAR, self._on_data)
+        # Tell Flipper our receive buffer size via flow control char
+        import struct
+        try:
+            await self.client.write_gatt_char(
+                FC_CHAR, struct.pack(">I", 8192), response=False
+            )
+        except Exception:
+            pass  # FC write not supported on all firmware versions
         await self._init_rpc_session()
 
     async def _init_rpc_session(self, timeout: float = 5.0) -> None:
